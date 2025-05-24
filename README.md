@@ -54,13 +54,14 @@ P社游戏DLC破解补丁
 ├── requirements.txt          # Python依赖包列表
 ├── update_dlc.py             # DLC更新脚本
 ├── setup_cron.sh             # 自动更新设置脚本
+├── setup_task.bat            # 自动更新设置脚本
 ├── logs/                     # 日志文件夹
 │   └── dlc_updater.log       # 更新日志
-├── 正版联机&DLC破解补丁/       # 正版联机补丁
+├── 正版联机&DLC破解补丁/       # 正版补丁
 │   ├── cream_api.ini         # DLC配置文件
 │   └── 使用说明.txt           # 使用说明
-└── 局域网联机&DLC破解补丁/     # 局域网联机补丁
-    ├── steam_settings/DLC.txt # Steam设置
+└── 局域网联机&DLC破解补丁/     # 局域网补丁
+    ├── steam_settings/DLC.txt # DLC配置文件
     └── 使用说明.txt           # 使用说明
 ```
 
