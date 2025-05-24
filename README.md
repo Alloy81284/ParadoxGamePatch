@@ -27,7 +27,17 @@ P社游戏DLC破解补丁
    - 局域网联机：支持局域网内玩家联机
 
 ## 使用方法
-
+1. 确保系统已安装Python 3.x
+2. 编辑update_dlc.py中的文件路径
+3. 安装依赖包：
+   ```bash
+   pip install -r requirements.txt
+   ```
+   可能你要在虚拟环境中运行
+   ```bash
+   python update_dlc.py
+   ```
+   - 
 ### 安装步骤
 1. 下载最新版本的补丁包
 2. 解压下载的文件
@@ -36,18 +46,6 @@ P社游戏DLC破解补丁
      - 将文件覆盖到游戏根目录
    - 对于《十字军之王3》《英白拉多：罗马》《维多利亚3》：
      - 将文件覆盖到游戏根目录的`binaries`文件夹
-4. 启动游戏根目录的`dowser.exe`开始游戏
-
-### 自动更新
-项目包含自动更新功能，通过以下方式设置：
-1. 确保系统已安装Python 3.x
-2. 安装依赖包：
-   ```bash
-   pip install -r requirements.txt
-   ```
-3. 运行设置脚本：
-   - Linux/Mac: `./setup_cron.sh`
-   - Windows: 使用任务计划程序设置`update_dlc.py`的定时任务
 
 ## 项目结构
 ```
