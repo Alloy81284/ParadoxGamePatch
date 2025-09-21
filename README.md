@@ -35,7 +35,7 @@ P社游戏DLC破解补丁
    ```
    可能你要在虚拟环境中运行
    ```bash
-   python update_dlc.py
+   python enhanced_update_dlc.py
    ```
 
 ### 安装步骤
@@ -53,6 +53,7 @@ P社游戏DLC破解补丁
 ├── README.md                 # 项目说明文档
 ├── requirements.txt          # Python依赖包列表
 ├── update_dlc.py             # DLC更新脚本
+├── enhanced_update_dlc.py    # DLC新更新脚本
 ├── setup_cron.sh             # 自动更新设置脚本
 ├── setup_task.bat            # 自动更新设置脚本
 ├── logs/                     # 日志文件夹
@@ -71,13 +72,14 @@ P社游戏DLC破解补丁
 
 ## 更新日志
 - 2025.05.24: 版本发布
+- 2025.09.20: 新版本发布
 
 ## 常见问题
 1. Q: 为什么游戏无法启动？
    A: 请确保补丁文件已正确覆盖到对应目录，并检查游戏版本是否兼容。
 
 2. Q: 如何更新DLC列表？
-   A: 手动运行`update_dlc.py`脚本。
+   A: 手动运行`enhanced_update_dlc.py`脚本。
 
 ## 许可证
 本项目采用MIT许可证。详见[LICENSE](LICENSE)文件。
