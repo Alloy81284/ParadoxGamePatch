@@ -11,6 +11,7 @@ P社游戏DLC破解补丁
 - 十字军之王2 (Crusader Kings II)
 - 十字军之王3 (Crusader Kings III)
 - 欧陆风云4 (Europa Universalis IV)
+- 欧陆风云5 (Europa Universalis V)
 - 钢铁雄心4 (Hearts of Iron IV)
 - 英白拉多：罗马 (Imperator: Rome)
 - 群星 (Stellaris)
@@ -73,6 +74,7 @@ P社游戏DLC破解补丁
 ## 更新日志
 - 2025.05.24: 版本发布
 - 2025.09.20: 新版本发布
+- 2026.03.14: 修补版本
 
 ## 常见问题
 1. Q: 为什么游戏无法启动？
