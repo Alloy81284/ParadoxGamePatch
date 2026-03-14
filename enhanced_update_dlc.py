@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""
+增强版DLC更新脚本
+基于原有update_dlc.py，添加了获取隐藏DLC的功能
+
+修改内容：
+1. 添加已知隐藏DLC维护
+2. 添加ID范围扫描功能
+3. 改进DLC获取策略
+"""
 
 import os
 import json
@@ -63,7 +72,8 @@ GAME_IDS = {
     "Hearts of Iron IV": 394360,
     "Imperator: Rome": 859580,
     "Stellaris": 281990,
-    "Victoria 3": 529340
+    "Victoria 3": 529340,
+    "Europa Universalis V": 3450310
 }
 
 # 注：KNOWN_HIDDEN_DLCS 和 DLC_SCAN_RANGES 已移除
@@ -79,10 +89,10 @@ FALLBACK_DLC_NAMES = {
     
     # Hearts of Iron IV
     1032150: "Hearts of Iron IV: Man the Guns Wallpaper (Pre-Order)",
-    1206030: "Hearts of Iron IV: La Résistance Pre-Order Bonus",
+    1206030: "Hearts of Iron IV: La Resistance Pre-Order Bonus",
     1785140: "Hearts of Iron IV: No Step Back - Katyusha (Pre-Order Bonus)",
     1880660: "Hearts of Iron IV: By Blood Alone (Pre-Order Bonus)",
-    2280250: "Hearts of Iron IV: Arms Against Tyranny - Säkkijärven Polkka",
+    2280250: "Hearts of Iron IV: Arms Against Tyranny - Sakkijarven Polkka",
     2786480: "Country Pack - Hearts of Iron IV: Trial of Allegiance Pre-order Bonus",
     3152810: "Hearts of Iron IV: Expansion Pass 1",
     3152820: "Expansion pass 1 Bonus - Hearts of Iron IV: Supporter Pack",
@@ -161,7 +171,7 @@ FALLBACK_DLC_NAMES = {
     414300: "Europa Universalis IV: Catholic Majors Unit Pack",
     436121: "Europa Universalis IV: Mare Nostrum Content Pack",
     443720: "Europa Universalis IV: Sounds from the community - Kairi Soundtrack Part II",
-    472030: "Europa Universalis IV: Fredman's Epistles",
+    472030: "Europa Universalis IV: Fredman Epistles",
     486571: "Europa Universalis IV: Rights of Man Content Pack",
     617962: "Europa Universalis IV: Early Upgrade Pack",
     625170: "Europa Universalis IV: Call-to-Arms Pack",
@@ -198,6 +208,12 @@ FALLBACK_DLC_NAMES = {
     210897: "Crusader Kings II: African Portraits",
     428720: "Crusader Kings II: South Indian Portraits",
 }
+
+def normalize_dlc_name(dlc_name):
+    """规范化DLC名称：移除单引号以防止配置文件问题"""
+    if isinstance(dlc_name, str):
+        return dlc_name.replace("'", "")
+    return dlc_name
 
 def create_session():
     """创建请求会话"""
@@ -240,7 +256,7 @@ def get_single_dlc_info(dlc_appid):
                 if isinstance(dlc_info, dict) and dlc_info.get('success', False):
                     dlc_details = dlc_info.get('data', {})
                     if isinstance(dlc_details, dict):
-                        dlc_name = dlc_details.get('name', f'Unknown DLC {dlc_appid}')
+                        dlc_name = normalize_dlc_name(dlc_details.get('name', f'Unknown DLC {dlc_appid}'))
                         return str(dlc_appid), dlc_name
             return None
         except Exception as e:
@@ -317,7 +333,7 @@ def get_dlc_via_steamcmd(app_id):
                         dlc_info = data.get(dlc_id, {})
                         if dlc_info.get('success'):
                             dlc_data = dlc_info.get('data', {})
-                            dlc_name = dlc_data.get('name', f"DLC {dlc_id}")
+                            dlc_name = normalize_dlc_name(dlc_data.get('name', f"DLC {dlc_id}"))
                             dlc_dict[dlc_id] = dlc_name
                             logging.info(f"获取DLC名称: {dlc_id} = {dlc_name}")
                         else:
@@ -325,6 +341,7 @@ def get_dlc_via_steamcmd(app_id):
                             try:
                                 fallback_name = FALLBACK_DLC_NAMES.get(int(dlc_id))
                                 if fallback_name:
+                                    fallback_name = normalize_dlc_name(fallback_name)
                                     dlc_dict[dlc_id] = fallback_name
                                     logging.info(f"使用后备名称: {dlc_id} = {fallback_name}")
                                 else:
@@ -338,6 +355,7 @@ def get_dlc_via_steamcmd(app_id):
                         try:
                             fallback_name = FALLBACK_DLC_NAMES.get(int(dlc_id))
                             if fallback_name:
+                                fallback_name = normalize_dlc_name(fallback_name)
                                 dlc_dict[dlc_id] = fallback_name
                                 logging.info(f"HTTP错误，使用后备名称: {dlc_id} = {fallback_name}")
                             else:
@@ -355,6 +373,7 @@ def get_dlc_via_steamcmd(app_id):
                     try:
                         fallback_name = FALLBACK_DLC_NAMES.get(int(dlc_id))
                         if fallback_name:
+                            fallback_name = normalize_dlc_name(fallback_name)
                             dlc_dict[dlc_id] = fallback_name
                             logging.info(f"请求异常，使用后备名称: {dlc_id} = {fallback_name}")
                         else:
@@ -497,13 +516,73 @@ def parse_existing_dlc_from_txt(txt_path):
             game_dlc.setdefault(current_game, set()).add(dlc_id)
     return game_dlc
 
-def append_new_dlc_to_ini(ini_path, new_dlc_dict):
-    """将新DLC追加到cream_api.ini对应区块末尾"""
+def parse_existing_dlc_names_from_ini(ini_path):
+    """解析cream_api.ini中每个游戏的DLC名称映射"""
+    if not os.path.exists(ini_path):
+        return {}
+    with open(ini_path, 'r', encoding='utf-8') as f:
+        lines = f.readlines()
+    game_dlc = {}
+    current_game = None
+    in_dlc_block = False
+    for line in lines:
+        line_strip = line.strip()
+        if line_strip.startswith(';') and not line_strip.startswith(';lowviolence'):
+            current_game = line_strip[1:].strip()
+            in_dlc_block = False
+        elif line_strip == '[dlc]':
+            in_dlc_block = True
+        elif line_strip.startswith('[') and line_strip != '[dlc]':
+            in_dlc_block = False
+        elif in_dlc_block and '=' in line_strip and current_game:
+            dlc_id, dlc_name = [s.strip() for s in line_strip.split('=', 1)]
+            game_dlc.setdefault(current_game, {})[dlc_id] = normalize_dlc_name(dlc_name)
+    return game_dlc
+
+def parse_existing_dlc_names_from_txt(txt_path):
+    """解析DLC.txt中每个游戏的DLC名称映射"""
+    if not os.path.exists(txt_path):
+        return {}
+    with open(txt_path, 'r', encoding='utf-8') as f:
+        lines = f.readlines()
+    game_dlc = {}
+    current_game = None
+    for line in lines:
+        line_strip = line.strip()
+        if line_strip.startswith('#'):
+            current_game = line_strip[1:].strip()
+        elif '=' in line_strip and current_game:
+            dlc_id, dlc_name = [s.strip() for s in line_strip.split('=', 1)]
+            game_dlc.setdefault(current_game, {})[dlc_id] = normalize_dlc_name(dlc_name)
+    return game_dlc
+
+def append_new_dlc_to_ini(ini_path, new_dlc_dict, latest_dlc_by_game=None):
+    """将新DLC追加到cream_api.ini对应区块末尾，避免重复和异常空格"""
     if not os.path.exists(ini_path):
         logging.error(f"找不到 {ini_path}")
         return
     with open(ini_path, 'r', encoding='utf-8') as f:
         lines = f.readlines()
+    
+    # 解析现有DLC（用于去重与名称更新）
+    existing_dlc_map = {}  # {game_name: {dlc_id: dlc_name}}
+    current_game = None
+    in_dlc_block = False
+    
+    for line in lines:
+        line_strip = line.strip()
+        if line_strip.startswith(';') and not line_strip.startswith(';lowviolence'):
+            current_game = line_strip[1:].strip()
+            in_dlc_block = False
+        elif line_strip == '[dlc]':
+            in_dlc_block = True
+        elif line_strip.startswith('[') and line_strip != '[dlc]':
+            in_dlc_block = False
+        elif in_dlc_block and '=' in line_strip and current_game:
+            dlc_id, dlc_name = [s.strip() for s in line_strip.split('=', 1)]
+            if current_game not in existing_dlc_map:
+                existing_dlc_map[current_game] = {}
+            existing_dlc_map[current_game][dlc_id] = normalize_dlc_name(dlc_name)
     
     # 找到每个游戏区块的结束位置
     game_blocks = {}
@@ -538,14 +617,63 @@ def append_new_dlc_to_ini(ini_path, new_dlc_dict):
     current_pos = 0
     
     for game_name, (start, end) in sorted(game_blocks.items(), key=lambda x: x[1][0]):
-        output_lines.extend(lines[current_pos:end])
+        # 复制区块并移除DLC块内空行
+        segment = lines[current_pos:end]
+        if game_name in existing_dlc_map:
+            segment_lines = []
+            in_dlc = False
+            for line in segment:
+                line_strip = line.strip()
+                if line_strip == '[dlc]':
+                    in_dlc = True
+                    segment_lines.append(line)
+                    continue
+                if line_strip.startswith('[') and line_strip != '[dlc]':
+                    in_dlc = False
+                if in_dlc and not line_strip:
+                    continue
+                segment_lines.append(line)
+            segment = segment_lines
+        output_lines.extend(segment)
         
         if game_name in new_dlc_dict and new_dlc_dict[game_name]:
-            if output_lines and output_lines[-1].strip():
-                output_lines.append('\n')
-            for dlc_id, dlc_name in sorted(new_dlc_dict[game_name].items(), key=lambda x: int(x[0])):
-                output_lines.append(f"{dlc_id} = {dlc_name}\n")
-            logging.info(f"{game_name} 追加 {len(new_dlc_dict[game_name])} 个新DLC到cream_api.ini")
+            # 过滤掉已存在的DLC，避免重复
+            existing_ids = set(existing_dlc_map.get(game_name, {}).keys())
+            new_dlcs_to_add = {dlc_id: dlc_name for dlc_id, dlc_name in new_dlc_dict[game_name].items()
+                               if dlc_id not in existing_ids}
+            
+            if new_dlcs_to_add:
+                # 检查是否需要添加空行分隔符
+                if output_lines and output_lines[-1].strip():
+                    output_lines.append('\n')
+                
+                for dlc_id, dlc_name in sorted(new_dlcs_to_add.items(), key=lambda x: int(x[0])):
+                    normalized_name = normalize_dlc_name(dlc_name)
+                    output_lines.append(f"{dlc_id} = {normalized_name}\n")
+                
+                logging.info(f"{game_name} 追加 {len(new_dlcs_to_add)} 个新DLC到cream_api.ini")
+            else:
+                logging.info(f"{game_name} 没有新DLC需要添加（已全部存在）")
+
+        # 如果已有DLC但名称不同，则替换名称
+        if game_name in existing_dlc_map:
+            updated_lines = []
+            in_dlc = False
+            for line in output_lines:
+                line_strip = line.strip()
+                if line_strip.startswith(';') and not line_strip.startswith(';lowviolence'):
+                    in_dlc = False
+                if line_strip == '[dlc]':
+                    in_dlc = True
+                if in_dlc and '=' in line_strip:
+                    dlc_id, dlc_name = [s.strip() for s in line_strip.split('=', 1)]
+                    latest_name = (latest_dlc_by_game or {}).get(game_name, {}).get(dlc_id)
+                    if latest_name:
+                        normalized_name = normalize_dlc_name(latest_name)
+                        updated_lines.append(f"{dlc_id} = {normalized_name}\n")
+                        continue
+                updated_lines.append(line)
+            output_lines = updated_lines
         
         current_pos = end
     
@@ -554,8 +682,8 @@ def append_new_dlc_to_ini(ini_path, new_dlc_dict):
     with open(ini_path, 'w', encoding='utf-8') as f:
         f.writelines(output_lines)
 
-def append_new_dlc_to_txt(txt_path, new_dlc_dict):
-    """将新DLC追加到DLC.txt对应游戏区块中，保持原始格式"""
+def append_new_dlc_to_txt(txt_path, new_dlc_dict, latest_dlc_by_game=None):
+    """将新DLC追加到DLC.txt对应游戏区块中，避免重复和异常空格"""
     if not os.path.exists(txt_path):
         logging.error(f"找不到 {txt_path}")
         return
@@ -576,34 +704,185 @@ def append_new_dlc_to_txt(txt_path, new_dlc_dict):
         
         new_dlc = new_dlc_dict.get(game_name, {})
         if new_dlc:
-            existing_dlc = {line.split('=')[0].strip(): line for line in dlc_lines}
-            for dlc_id, dlc_name in sorted(new_dlc.items(), key=lambda x: int(x[0])):
-                dlc_line = f"{dlc_id} = {dlc_name}"
-                if dlc_id not in existing_dlc:
-                    dlc_lines.append(dlc_line)
+            # 构建现有DLC的映射（用于去重）
+            existing_dlc_ids = set()
+            existing_dlc_map = {}
+            for line in dlc_lines:
+                if '=' in line:
+                    dlc_id = line.split('=', 1)[0].strip()
+                    existing_dlc_ids.add(dlc_id)
+                    existing_dlc_map[dlc_id] = line
             
-            dlc_lines.sort(key=lambda x: int(x.split('=')[0].strip()))
-            section_content = f"# {game_name}\n" + '\n'.join(dlc_lines)
+            # 只添加不存在的DLC
+            for dlc_id, dlc_name in sorted(new_dlc.items(), key=lambda x: int(x[0])):
+                if dlc_id not in existing_dlc_ids:
+                    dlc_line = f"{dlc_id} = {normalize_dlc_name(dlc_name)}"
+                    dlc_lines.append(dlc_line)
+                else:
+                    # 已存在则更新名称
+                    existing_dlc_map[dlc_id] = f"{dlc_id} = {normalize_dlc_name(dlc_name)}"
+
+            # 用最新名称替换已有条目
+            if latest_dlc_by_game and game_name in latest_dlc_by_game:
+                for dlc_id, dlc_name in latest_dlc_by_game[game_name].items():
+                    if dlc_id in existing_dlc_ids:
+                        existing_dlc_map[dlc_id] = f"{dlc_id} = {normalize_dlc_name(dlc_name)}"
+            
+            # 按DLC ID排序，规范化格式
+            dlc_lines_dict = {}
+            for line in dlc_lines:
+                if '=' in line:
+                    parts = line.split('=', 1)
+                    dlc_id = parts[0].strip()
+                    dlc_name = normalize_dlc_name(parts[1].strip())
+                    dlc_lines_dict[int(dlc_id)] = f"{dlc_id} = {dlc_name}"
+            
+            # 按ID排序后重新构建
+            sorted_dlc_lines = [dlc_lines_dict[dlc_id] for dlc_id in sorted(dlc_lines_dict.keys())]
+            section_content = f"# {game_name}\n" + '\n'.join(sorted_dlc_lines)
             output_sections.append(section_content)
-            logging.info(f"{game_name} 追加 {len(new_dlc)} 个新DLC到DLC.txt")
+            
+            newly_added = sum(1 for dlc_id in new_dlc.keys() if dlc_id not in existing_dlc_ids)
+            if newly_added > 0:
+                logging.info(f"{game_name} 追加 {newly_added} 个新DLC到DLC.txt")
+            else:
+                logging.info(f"{game_name} 没有新DLC需要添加（已全部存在）")
         else:
             output_sections.append(f"#{section.strip()}")
     
+    # 用两个换行符分隔游戏区块
+    output_content = '\n\n'.join(output_sections)
     with open(txt_path, 'w', encoding='utf-8') as f:
-        f.write('\n\n'.join(output_sections))
+        f.write(output_content)
+
+def clean_duplicate_dlc_in_ini(ini_path):
+    """清理cream_api.ini中重复的DLC条目，并规范化空格"""
+    if not os.path.exists(ini_path):
+        logging.warning(f"找不到 {ini_path}，跳过清理")
+        return
+    
+    with open(ini_path, 'r', encoding='utf-8') as f:
+        lines = f.readlines()
+    
+    output_lines = []
+    current_game = None
+    seen_dlc_ids = {}  # {game_name: {dlc_id, ...}}
+    in_dlc_block = False
+    
+    for line in lines:
+        line_strip = line.strip()
+        
+        # 识别游戏区块
+        if line_strip.startswith(';') and not line_strip.startswith(';lowviolence'):
+            if output_lines and output_lines[-1].strip():
+                output_lines.append('\n')
+            current_game = line_strip[1:].strip()
+            if current_game not in seen_dlc_ids:
+                seen_dlc_ids[current_game] = set()
+            in_dlc_block = False
+            output_lines.append(line)
+        # 识别DLC区块开始
+        elif line_strip == '[dlc]':
+            in_dlc_block = True
+            output_lines.append(line)
+        # 识别其他区块（结束DLC块）
+        elif line_strip.startswith('[') and line_strip != '[dlc]':
+            in_dlc_block = False
+            output_lines.append(line)
+        # 处理DLC行
+        elif in_dlc_block and '=' in line_strip and current_game:
+            dlc_id = line_strip.split('=', 1)[0].strip()
+            dlc_name = normalize_dlc_name(line_strip.split('=', 1)[1].strip())
+            
+            # 检查是否重复
+            if dlc_id not in seen_dlc_ids[current_game]:
+                # 规范化空格：id = name
+                output_lines.append(f"{dlc_id} = {dlc_name}\n")
+                seen_dlc_ids[current_game].add(dlc_id)
+            else:
+                logging.debug(f"移除重复DLC: {current_game} - {dlc_id}")
+        else:
+            if in_dlc_block and not line_strip:
+                continue
+            output_lines.append(line)
+    
+    with open(ini_path, 'w', encoding='utf-8') as f:
+        f.writelines(output_lines)
+    
+    logging.info("成功清理cream_api.ini中的重复DLC条目")
+
+def clean_duplicate_dlc_in_txt(txt_path):
+    """清理DLC.txt中重复的DLC条目，并规范化空格"""
+    if not os.path.exists(txt_path):
+        logging.warning(f"找不到 {txt_path}，跳过清理")
+        return
+    
+    with open(txt_path, 'r', encoding='utf-8') as f:
+        content = f.read()
+    
+    game_sections = content.split('#')
+    output_sections = []
+    
+    for section in game_sections:
+        if not section.strip():
+            continue
+        
+        lines = section.strip().split('\n')
+        game_name = lines[0].strip()
+        dlc_lines = lines[1:]
+        
+        # 去重并规范化格式
+        seen_dlc_ids = set()
+        cleaned_dlc_lines = []
+        
+        for line in dlc_lines:
+            line_strip = line.strip()
+            if not line_strip:
+                continue
+            
+            if '=' in line_strip:
+                dlc_id = line_strip.split('=', 1)[0].strip()
+                dlc_name = normalize_dlc_name(line_strip.split('=', 1)[1].strip())
+                
+                if dlc_id not in seen_dlc_ids:
+                    # 规范化空格：id = name
+                    cleaned_dlc_lines.append(f"{dlc_id} = {dlc_name}")
+                    seen_dlc_ids.add(dlc_id)
+        
+        # 按DLC ID排序
+        cleaned_dlc_lines_dict = {}
+        for line in cleaned_dlc_lines:
+            if '=' in line:
+                dlc_id = int(line.split('=')[0].strip())
+                cleaned_dlc_lines_dict[dlc_id] = line
+        
+        sorted_lines = [cleaned_dlc_lines_dict[dlc_id] for dlc_id in sorted(cleaned_dlc_lines_dict.keys())]
+        section_content = f"# {game_name}\n" + '\n'.join(sorted_lines)
+        output_sections.append(section_content)
+    
+    output_content = '\n\n'.join(output_sections)
+    with open(txt_path, 'w', encoding='utf-8') as f:
+        f.write(output_content)
+    
+    logging.info("成功清理DLC.txt中的重复DLC条目")
 
 def update_cream_api_ini_and_dlc_txt():
-    """主流程：更新DLC配置文件"""
+    """主流程：更新DLC配置文件，返回新增条目数量 (ini_count, txt_count)"""
     ini_path = os.path.join(正版补丁目录, 'cream_api.ini')
     txt_path = os.path.join(局域网补丁目录, 'steam_settings', 'DLC.txt')
     
     ini_existing = parse_existing_dlc_from_ini(ini_path)
     txt_existing = parse_existing_dlc_from_txt(txt_path)
+    ini_existing_names = parse_existing_dlc_names_from_ini(ini_path)
+    txt_existing_names = parse_existing_dlc_names_from_txt(txt_path)
     
     new_dlc_for_ini = {}
     new_dlc_for_txt = {}
+    ini_name_changed = 0
+    txt_name_changed = 0
+    latest_dlc_by_game = {}
     
-        # 获取游戏的所有DLC
+    # 获取游戏的所有DLC
     with ThreadPoolExecutor(max_workers=1) as executor:
         future_to_game = {
             executor.submit(get_steam_dlc_enhanced, app_id): game_name 
@@ -615,24 +894,39 @@ def update_cream_api_ini_and_dlc_txt():
             try:
                 latest_dlc = future.result()
                 
+                latest_dlc_by_game[game_name] = latest_dlc
+
                 # ini处理
                 ini_game_dlc = ini_existing.get(game_name, set())
                 ini_new = {dlc_id: dlc_name for dlc_id, dlc_name in latest_dlc.items() if dlc_id not in ini_game_dlc}
                 if ini_new:
                     new_dlc_for_ini[game_name] = ini_new
+                for dlc_id, dlc_name in latest_dlc.items():
+                    old_name = ini_existing_names.get(game_name, {}).get(dlc_id)
+                    if old_name and normalize_dlc_name(dlc_name) != old_name:
+                        ini_name_changed += 1
                 
                 # txt处理
                 txt_game_dlc = txt_existing.get(game_name, set())
                 txt_new = {dlc_id: dlc_name for dlc_id, dlc_name in latest_dlc.items() if dlc_id not in txt_game_dlc}
                 if txt_new:
                     new_dlc_for_txt[game_name] = txt_new
+                for dlc_id, dlc_name in latest_dlc.items():
+                    old_name = txt_existing_names.get(game_name, {}).get(dlc_id)
+                    if old_name and normalize_dlc_name(dlc_name) != old_name:
+                        txt_name_changed += 1
                     
             except Exception as e:
                 logging.error(f"处理游戏 {game_name} 的DLC时发生错误: {str(e)}")
     
-    append_new_dlc_to_ini(ini_path, new_dlc_for_ini)
-    append_new_dlc_to_txt(txt_path, new_dlc_for_txt)
-    logging.info("所有新DLC追加完成")
+    append_new_dlc_to_ini(ini_path, new_dlc_for_ini, latest_dlc_by_game)
+    append_new_dlc_to_txt(txt_path, new_dlc_for_txt, latest_dlc_by_game)
+    ini_added = sum(len(v) for v in new_dlc_for_ini.values())
+    txt_added = sum(len(v) for v in new_dlc_for_txt.values())
+    logging.info(f"所有新DLC追加完成：ini新增 {ini_added} 条，txt新增 {txt_added} 条")
+    if ini_name_changed or txt_name_changed:
+        logging.info(f"检测到名称变化：ini {ini_name_changed} 条，txt {txt_name_changed} 条")
+    return ini_added, txt_added, ini_name_changed, txt_name_changed
 
 def create_zip_archive():
     """创建带日期的zip压缩包"""
@@ -667,27 +961,15 @@ def main():
         ini_path = os.path.join(正版补丁目录, 'cream_api.ini')
         txt_path = os.path.join(局域网补丁目录, 'steam_settings', 'DLC.txt')
         
-        ini_hash_before = None
-        txt_hash_before = None
-        if os.path.exists(ini_path):
-            with open(ini_path, "rb") as f:
-                ini_hash_before = hashlib.md5(f.read()).hexdigest()
-        if os.path.exists(txt_path):
-            with open(txt_path, "rb") as f:
-                txt_hash_before = hashlib.md5(f.read()).hexdigest()
+        # 第一步：清理现有的重复DLC条目
+        logging.info("第一步：清理现有配置文件中的重复条目和异常空格...")
+        clean_duplicate_dlc_in_ini(ini_path)
+        clean_duplicate_dlc_in_txt(txt_path)
         
-        update_cream_api_ini_and_dlc_txt()
-        
-        ini_hash_after = None
-        txt_hash_after = None
-        if os.path.exists(ini_path):
-            with open(ini_path, "rb") as f:
-                ini_hash_after = hashlib.md5(f.read()).hexdigest()
-        if os.path.exists(txt_path):
-            with open(txt_path, "rb") as f:
-                txt_hash_after = hashlib.md5(f.read()).hexdigest()
-        
-        has_changes = (ini_hash_before != ini_hash_after) or (txt_hash_before != txt_hash_after)
+        # 第二步：更新并追加新DLC
+        logging.info("第二步：检查并追加新DLC...")
+        ini_added, txt_added, ini_name_changed, txt_name_changed = update_cream_api_ini_and_dlc_txt()
+        has_changes = (ini_added + txt_added + ini_name_changed + txt_name_changed) > 0
         
         if has_changes:
             logging.info("检测到DLC更新，开始创建新的压缩包...")
