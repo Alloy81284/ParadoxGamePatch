@@ -56,6 +56,9 @@ STEAM_STORE_API_URL = "https://store.steampowered.com/api/appdetails"
 # SteamCMD配置
 STEAMCMD_CMD = "/data/steamcmd.sh"
 
+# 名称稳定模式：已有非泛化名称则保持不变，避免API名称来回波动
+STABLE_NAME_MODE = True
+
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
     'Accept': 'application/json',
@@ -214,6 +217,71 @@ def normalize_dlc_name(dlc_name):
     if isinstance(dlc_name, str):
         return dlc_name.replace("'", "")
     return dlc_name
+
+def canonicalize_dlc_name(dlc_name):
+    """用于比较的名称规范化（忽略大小写/多空格/破折号差异）"""
+    if not dlc_name:
+        return ""
+    name = normalize_dlc_name(dlc_name)
+    name = name.replace("\u2013", "-").replace("\u2014", "-")
+    name = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", " ", name)
+    name = re.sub(r"\s+", " ", name).strip()
+    return name.casefold()
+
+def is_generic_dlc_name(dlc_id, dlc_name):
+    """判断是否为泛化名称（避免用劣质名称覆盖已有名称）"""
+    if not dlc_name:
+        return True
+    name = normalize_dlc_name(dlc_name)
+    return name in {f"DLC {dlc_id}", f"Unknown DLC {dlc_id}"}
+
+def should_update_dlc_name(dlc_id, old_name, new_name):
+    if not new_name:
+        return False
+    if old_name is None:
+        return True
+    if is_generic_dlc_name(dlc_id, old_name) and not is_generic_dlc_name(dlc_id, new_name):
+        return True
+    if is_generic_dlc_name(dlc_id, new_name):
+        return False
+    if STABLE_NAME_MODE:
+        return False
+    return canonicalize_dlc_name(new_name) != canonicalize_dlc_name(old_name)
+
+def compute_file_hash(file_path):
+    if not os.path.exists(file_path):
+        return None
+    hasher = hashlib.md5()
+    with open(file_path, "rb") as f:
+        hasher.update(f.read())
+    return hasher.hexdigest()
+
+def compute_files_hash(file_paths):
+    """计算多个文件的联合哈希"""
+    hasher = hashlib.md5()
+    for file_path in file_paths:
+        if not os.path.exists(file_path):
+            continue
+        with open(file_path, "rb") as f:
+            hasher.update(f.read())
+    return hasher.hexdigest()
+
+def load_last_pack_hash(state_path):
+    if not os.path.exists(state_path):
+        return None
+    try:
+        with open(state_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data.get("hash")
+    except Exception:
+        return None
+
+def save_last_pack_hash(state_path, hash_value):
+    try:
+        with open(state_path, "w", encoding="utf-8") as f:
+            json.dump({"hash": hash_value}, f, ensure_ascii=False)
+    except Exception:
+        pass
 
 def create_session():
     """创建请求会话"""
@@ -668,7 +736,7 @@ def append_new_dlc_to_ini(ini_path, new_dlc_dict, latest_dlc_by_game=None):
                 if in_dlc and '=' in line_strip:
                     dlc_id, dlc_name = [s.strip() for s in line_strip.split('=', 1)]
                     latest_name = (latest_dlc_by_game or {}).get(game_name, {}).get(dlc_id)
-                    if latest_name:
+                    if latest_name and should_update_dlc_name(dlc_id, dlc_name, latest_name):
                         normalized_name = normalize_dlc_name(latest_name)
                         updated_lines.append(f"{dlc_id} = {normalized_name}\n")
                         continue
@@ -701,54 +769,63 @@ def append_new_dlc_to_txt(txt_path, new_dlc_dict, latest_dlc_by_game=None):
         lines = section.strip().split('\n')
         game_name = lines[0].strip()
         dlc_lines = [line.strip() for line in lines[1:] if line.strip()]
-        
+
+        # 构建现有DLC的映射（用于去重与名称更新）
+        existing_dlc_ids = set()
+        existing_dlc_map = {}
+        for line in dlc_lines:
+            if '=' in line:
+                dlc_id = line.split('=', 1)[0].strip()
+                existing_dlc_ids.add(dlc_id)
+                existing_dlc_map[dlc_id] = line
+
         new_dlc = new_dlc_dict.get(game_name, {})
+
+        # 只添加不存在的DLC
         if new_dlc:
-            # 构建现有DLC的映射（用于去重）
-            existing_dlc_ids = set()
-            existing_dlc_map = {}
-            for line in dlc_lines:
-                if '=' in line:
-                    dlc_id = line.split('=', 1)[0].strip()
-                    existing_dlc_ids.add(dlc_id)
-                    existing_dlc_map[dlc_id] = line
-            
-            # 只添加不存在的DLC
             for dlc_id, dlc_name in sorted(new_dlc.items(), key=lambda x: int(x[0])):
                 if dlc_id not in existing_dlc_ids:
                     dlc_line = f"{dlc_id} = {normalize_dlc_name(dlc_name)}"
                     dlc_lines.append(dlc_line)
                 else:
                     # 已存在则更新名称
-                    existing_dlc_map[dlc_id] = f"{dlc_id} = {normalize_dlc_name(dlc_name)}"
-
-            # 用最新名称替换已有条目
-            if latest_dlc_by_game and game_name in latest_dlc_by_game:
-                for dlc_id, dlc_name in latest_dlc_by_game[game_name].items():
-                    if dlc_id in existing_dlc_ids:
+                    old_line = existing_dlc_map.get(dlc_id, "")
+                    old_name = old_line.split('=', 1)[1].strip() if '=' in old_line else ""
+                    if should_update_dlc_name(dlc_id, old_name, dlc_name):
                         existing_dlc_map[dlc_id] = f"{dlc_id} = {normalize_dlc_name(dlc_name)}"
-            
-            # 按DLC ID排序，规范化格式
-            dlc_lines_dict = {}
-            for line in dlc_lines:
-                if '=' in line:
-                    parts = line.split('=', 1)
-                    dlc_id = parts[0].strip()
-                    dlc_name = normalize_dlc_name(parts[1].strip())
-                    dlc_lines_dict[int(dlc_id)] = f"{dlc_id} = {dlc_name}"
-            
-            # 按ID排序后重新构建
-            sorted_dlc_lines = [dlc_lines_dict[dlc_id] for dlc_id in sorted(dlc_lines_dict.keys())]
-            section_content = f"# {game_name}\n" + '\n'.join(sorted_dlc_lines)
-            output_sections.append(section_content)
-            
+
+        # 用最新名称替换已有条目（无新增也会执行）
+        if latest_dlc_by_game and game_name in latest_dlc_by_game:
+            for dlc_id, dlc_name in latest_dlc_by_game[game_name].items():
+                if dlc_id in existing_dlc_ids:
+                    old_line = existing_dlc_map.get(dlc_id, "")
+                    old_name = old_line.split('=', 1)[1].strip() if '=' in old_line else ""
+                    if should_update_dlc_name(dlc_id, old_name, dlc_name):
+                        existing_dlc_map[dlc_id] = f"{dlc_id} = {normalize_dlc_name(dlc_name)}"
+
+        # 按DLC ID排序，规范化格式
+        dlc_lines_dict = {}
+        for line in dlc_lines:
+            if '=' in line:
+                parts = line.split('=', 1)
+                dlc_id = parts[0].strip()
+                dlc_name = normalize_dlc_name(parts[1].strip())
+                dlc_lines_dict[int(dlc_id)] = f"{dlc_id} = {dlc_name}"
+        for dlc_id, line in existing_dlc_map.items():
+            if dlc_id.isdigit():
+                dlc_lines_dict[int(dlc_id)] = line
+
+        # 按ID排序后重新构建
+        sorted_dlc_lines = [dlc_lines_dict[dlc_id] for dlc_id in sorted(dlc_lines_dict.keys())]
+        section_content = f"# {game_name}\n" + '\n'.join(sorted_dlc_lines)
+        output_sections.append(section_content)
+
+        if new_dlc:
             newly_added = sum(1 for dlc_id in new_dlc.keys() if dlc_id not in existing_dlc_ids)
             if newly_added > 0:
                 logging.info(f"{game_name} 追加 {newly_added} 个新DLC到DLC.txt")
             else:
                 logging.info(f"{game_name} 没有新DLC需要添加（已全部存在）")
-        else:
-            output_sections.append(f"#{section.strip()}")
     
     # 用两个换行符分隔游戏区块
     output_content = '\n\n'.join(output_sections)
@@ -880,6 +957,8 @@ def update_cream_api_ini_and_dlc_txt():
     new_dlc_for_txt = {}
     ini_name_changed = 0
     txt_name_changed = 0
+    ini_name_changes = []
+    txt_name_changes = []
     latest_dlc_by_game = {}
     
     # 获取游戏的所有DLC
@@ -903,8 +982,9 @@ def update_cream_api_ini_and_dlc_txt():
                     new_dlc_for_ini[game_name] = ini_new
                 for dlc_id, dlc_name in latest_dlc.items():
                     old_name = ini_existing_names.get(game_name, {}).get(dlc_id)
-                    if old_name and normalize_dlc_name(dlc_name) != old_name:
+                    if old_name and should_update_dlc_name(dlc_id, old_name, dlc_name):
                         ini_name_changed += 1
+                        ini_name_changes.append((game_name, dlc_id, old_name, dlc_name))
                 
                 # txt处理
                 txt_game_dlc = txt_existing.get(game_name, set())
@@ -913,8 +993,9 @@ def update_cream_api_ini_and_dlc_txt():
                     new_dlc_for_txt[game_name] = txt_new
                 for dlc_id, dlc_name in latest_dlc.items():
                     old_name = txt_existing_names.get(game_name, {}).get(dlc_id)
-                    if old_name and normalize_dlc_name(dlc_name) != old_name:
+                    if old_name and should_update_dlc_name(dlc_id, old_name, dlc_name):
                         txt_name_changed += 1
+                        txt_name_changes.append((game_name, dlc_id, old_name, dlc_name))
                     
             except Exception as e:
                 logging.error(f"处理游戏 {game_name} 的DLC时发生错误: {str(e)}")
@@ -926,27 +1007,82 @@ def update_cream_api_ini_and_dlc_txt():
     logging.info(f"所有新DLC追加完成：ini新增 {ini_added} 条，txt新增 {txt_added} 条")
     if ini_name_changed or txt_name_changed:
         logging.info(f"检测到名称变化：ini {ini_name_changed} 条，txt {txt_name_changed} 条")
+        try:
+            changes_path = os.path.join(log_dir, "name_changes.txt")
+            with open(changes_path, "w", encoding="utf-8") as f:
+                f.write(f"time = {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                for game_name, dlc_id, old_name, new_name in ini_name_changes:
+                    f.write(f"INI | {game_name} | {dlc_id} | {old_name} => {new_name}\n")
+                for game_name, dlc_id, old_name, new_name in txt_name_changes:
+                    f.write(f"TXT | {game_name} | {dlc_id} | {old_name} => {new_name}\n")
+            logging.info(f"名称变化明细已写入: {changes_path}")
+        except Exception as e:
+            logging.warning(f"写入名称变化明细失败: {e}")
     return ini_added, txt_added, ini_name_changed, txt_name_changed
 
 def create_zip_archive():
     """创建带日期的zip压缩包"""
     try:
         current_date = datetime.now().strftime("%Y.%m.%d")
+        current_time = datetime.now().strftime("%H%M%S")
         temp_dir = os.path.join(base_dir, "temp_backup")
         if os.path.exists(temp_dir):
             shutil.rmtree(temp_dir)
         os.makedirs(temp_dir)
         
+        src_ini_path = os.path.join(正版补丁目录, 'cream_api.ini')
+        src_txt_path = os.path.join(局域网补丁目录, 'steam_settings', 'DLC.txt')
+
         shutil.copytree(正版补丁目录, os.path.join(temp_dir, "正版DLC破解补丁"))
         shutil.copytree(局域网补丁目录, os.path.join(temp_dir, "局域网DLC破解补丁"))
+
+        temp_ini_path = os.path.join(temp_dir, "正版DLC破解补丁", 'cream_api.ini')
+        temp_txt_path = os.path.join(temp_dir, "局域网DLC破解补丁", 'steam_settings', 'DLC.txt')
         
-        zip_filename = os.path.join(output_dir, f"【{current_date}】P社游戏DLC补丁.zip")
+        # 写入构建信息，便于确认打包来源
+        ini_mtime = datetime.fromtimestamp(os.path.getmtime(src_ini_path)).strftime("%Y-%m-%d %H:%M:%S") if os.path.exists(src_ini_path) else "N/A"
+        txt_mtime = datetime.fromtimestamp(os.path.getmtime(src_txt_path)).strftime("%Y-%m-%d %H:%M:%S") if os.path.exists(src_txt_path) else "N/A"
+        src_ini_hash = compute_file_hash(src_ini_path)
+        src_txt_hash = compute_file_hash(src_txt_path)
+        temp_ini_hash = compute_file_hash(temp_ini_path)
+        temp_txt_hash = compute_file_hash(temp_txt_path)
+        content_hash = compute_files_hash([src_ini_path, src_txt_path])
+        build_info_path = os.path.join(temp_dir, "build_info.txt")
+        with open(build_info_path, "w", encoding="utf-8") as f:
+            f.write(f"build_time = {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"ini_mtime = {ini_mtime}\n")
+            f.write(f"txt_mtime = {txt_mtime}\n")
+            f.write(f"content_hash = {content_hash}\n")
+            f.write(f"src_ini_hash = {src_ini_hash}\n")
+            f.write(f"src_txt_hash = {src_txt_hash}\n")
+            f.write(f"temp_ini_hash = {temp_ini_hash}\n")
+            f.write(f"temp_txt_hash = {temp_txt_hash}\n")
+
+        zip_filename = os.path.join(output_dir, f"【{current_date}-{current_time}】P社游戏DLC补丁.zip")
+        if os.path.exists(zip_filename):
+            os.remove(zip_filename)
         with zipfile.ZipFile(zip_filename, 'w', zipfile.ZIP_DEFLATED) as zipf:
             for root, dirs, files in os.walk(temp_dir):
                 for file in files:
                     file_path = os.path.join(root, file)
                     arcname = os.path.relpath(file_path, temp_dir)
                     zipf.write(file_path, arcname)
+
+        # 校验压缩包内文件与源文件一致
+        zip_ini_path = "正版DLC破解补丁/cream_api.ini"
+        zip_txt_path = "局域网DLC破解补丁/steam_settings/DLC.txt"
+        zip_ini_hash = None
+        zip_txt_hash = None
+        with zipfile.ZipFile(zip_filename, 'r') as zipf:
+            if zip_ini_path in zipf.namelist():
+                zip_ini_hash = hashlib.md5(zipf.read(zip_ini_path)).hexdigest()
+            if zip_txt_path in zipf.namelist():
+                zip_txt_hash = hashlib.md5(zipf.read(zip_txt_path)).hexdigest()
+
+        if (src_ini_hash and zip_ini_hash and src_ini_hash != zip_ini_hash) or (src_txt_hash and zip_txt_hash and src_txt_hash != zip_txt_hash):
+            logging.error("压缩包内文件与源文件不一致，已删除压缩包")
+            os.remove(zip_filename)
+            return
         
         shutil.rmtree(temp_dir)
         logging.info(f"成功创建压缩包: {zip_filename}")
@@ -970,11 +1106,19 @@ def main():
         logging.info("第二步：检查并追加新DLC...")
         ini_added, txt_added, ini_name_changed, txt_name_changed = update_cream_api_ini_and_dlc_txt()
         has_changes = (ini_added + txt_added + ini_name_changed + txt_name_changed) > 0
+
+        # 第三步：基于文件内容哈希判断是否需要打包
+        state_path = os.path.join(log_dir, "last_pack_hash.json")
+        current_hash = compute_files_hash([ini_path, txt_path])
+        last_hash = load_last_pack_hash(state_path)
+        hash_changed = (current_hash != last_hash)
+        has_changes = has_changes or hash_changed
         
         if has_changes:
             logging.info("检测到DLC更新，开始创建新的压缩包...")
             create_zip_archive()
             logging.info("压缩包创建完成")
+            save_last_pack_hash(state_path, current_hash)
         else:
             logging.info("未检测到DLC更新，跳过创建压缩包")
             
