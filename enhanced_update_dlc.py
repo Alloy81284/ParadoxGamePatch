@@ -28,6 +28,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from itertools import islice
 import random
 import hashlib
+import threading
 
 # 配置日志和输出目录
 log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
@@ -59,6 +60,13 @@ STEAMCMD_CMD = "/data/steamcmd.sh"
 # 名称稳定模式：已有非泛化名称则保持不变，避免API名称来回波动
 STABLE_NAME_MODE = True
 
+# Steam Store API 对 429 很敏感：全局限速 + 长退避，避免中途被限流导致某些游戏完全跳过
+STORE_API_MIN_INTERVAL = 1.2
+STORE_API_MAX_ATTEMPTS = 8
+STORE_API_TIMEOUT = 30
+_store_api_lock = threading.Lock()
+_last_store_api_request_at = 0
+
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
     'Accept': 'application/json',
@@ -77,6 +85,13 @@ GAME_IDS = {
     "Stellaris": 281990,
     "Victoria 3": 529340,
     "Europa Universalis V": 3450310
+}
+
+# 这些老游戏通常不再新增DLC：跳过网络扫描，但保留配置文件中已有DLC
+SKIP_SCAN_GAMES = {
+    "Crusader Kings II",
+    "Imperator: Rome",
+    "Europa Universalis IV",
 }
 
 # 注：KNOWN_HIDDEN_DLCS 和 DLC_SCAN_RANGES 已移除
@@ -287,9 +302,9 @@ def create_session():
     """创建请求会话"""
     session = requests.Session()
     retry_strategy = Retry(
-        total=5,
+        total=3,
         backoff_factor=2,
-        status_forcelist=[429, 500, 502, 503, 504],
+        status_forcelist=[500, 502, 503, 504],
         allowed_methods=["GET", "POST"],
         respect_retry_after_header=True
     )
@@ -305,6 +320,37 @@ def create_session():
 
 session = create_session()
 
+def store_api_get(params, timeout=STORE_API_TIMEOUT):
+    """访问Steam Store API：统一限速，429时等待后重试。"""
+    global _last_store_api_request_at
+    for attempt in range(1, STORE_API_MAX_ATTEMPTS + 1):
+        with _store_api_lock:
+            now = time.monotonic()
+            wait_time = STORE_API_MIN_INTERVAL - (now - _last_store_api_request_at)
+            if wait_time > 0:
+                time.sleep(wait_time + random.uniform(0.1, 0.5))
+            _last_store_api_request_at = time.monotonic()
+
+        try:
+            response = session.get(STEAM_STORE_API_URL, params=params, headers=HEADERS, timeout=timeout)
+            if response.status_code == 429:
+                retry_after = response.headers.get('Retry-After')
+                if retry_after and retry_after.isdigit():
+                    sleep_seconds = int(retry_after)
+                else:
+                    sleep_seconds = min(300, 20 * attempt) + random.uniform(1, 5)
+                logging.warning(f"Steam Store API限流(429)，等待 {sleep_seconds:.1f} 秒后重试 ({attempt}/{STORE_API_MAX_ATTEMPTS})")
+                time.sleep(sleep_seconds)
+                continue
+            return response
+        except requests.exceptions.RequestException as e:
+            if attempt >= STORE_API_MAX_ATTEMPTS:
+                raise
+            sleep_seconds = min(120, 5 * attempt) + random.uniform(1, 3)
+            logging.warning(f"Steam Store API请求失败，等待 {sleep_seconds:.1f} 秒后重试 ({attempt}/{STORE_API_MAX_ATTEMPTS}): {e}")
+            time.sleep(sleep_seconds)
+    raise requests.exceptions.RetryError("Steam Store API重试次数耗尽")
+
 def get_single_dlc_info(dlc_appid):
     """获取单个DLC的详细信息"""
     max_retries = 3
@@ -317,7 +363,7 @@ def get_single_dlc_info(dlc_appid):
                 'cc': 'us',
                 'l': 'english'
             }
-            response = session.get(STEAM_STORE_API_URL, params=params, headers=HEADERS, timeout=30)
+            response = store_api_get(params)
             if response.status_code == 200:
                 data = response.json()
                 dlc_info = data.get(str(dlc_appid), {})
@@ -351,7 +397,6 @@ def get_dlc_via_steamcmd(app_id):
     try:
         import subprocess
         import tempfile
-        import requests
         import time
         
         # 使用SteamCMD获取应用信息
@@ -393,8 +438,7 @@ def get_dlc_via_steamcmd(app_id):
                         'l': 'english'
                     }
                     
-                    response = requests.get('https://store.steampowered.com/api/appdetails', 
-                                          params=params, timeout=10)
+                    response = store_api_get(params, timeout=10)
                     
                     if response.status_code == 200:
                         data = response.json()
@@ -434,7 +478,7 @@ def get_dlc_via_steamcmd(app_id):
                             logging.debug(f"HTTP错误 {response.status_code}: {dlc_id}")
                     
                     # 避免请求过快
-                    time.sleep(0.3)
+                    time.sleep(0.2 + random.uniform(0.1, 0.4))
                     
                 except Exception as e:
                     # 异常处理，尝试使用后备名称映射
@@ -480,7 +524,8 @@ def get_hidden_dlcs(app_id, game_name):
 def get_steam_dlc_enhanced(app_id):
     """获取游戏的所有DLC（官方+隐藏）"""
     game_name = next((name for name, id in GAME_IDS.items() if id == app_id), f"Game {app_id}")
-    
+    official_failed = False
+
     try:
         # 1. 获取官方DLC列表
         params = {
@@ -490,40 +535,40 @@ def get_steam_dlc_enhanced(app_id):
             'l': 'english'
         }
         logging.info(f"正在获取游戏 {app_id} 的官方DLC列表...")
-        response = session.get(STEAM_STORE_API_URL, params=params, headers=HEADERS, timeout=30)
-        
         official_dlcs = {}
-        if response.status_code == 200:
-            data = response.json()
-            app_data = data.get(str(app_id), {})
-            if app_data.get('success', False):
-                game_info = app_data.get('data', {})
-                dlc_list = game_info.get('dlc', [])
-                
-                if dlc_list:
-                    logging.info(f"找到 {len(dlc_list)} 个官方DLC，开始获取详细信息...")
-                    
-                    # 并发获取官方DLC信息
-                    with ThreadPoolExecutor(max_workers=3) as executor:
-                        future_to_dlc = {
-                            executor.submit(get_single_dlc_info, dlc_appid): dlc_appid 
-                            for dlc_appid in dlc_list
-                        }
-                        
-                        for future in as_completed(future_to_dlc):
-                            dlc_appid = future_to_dlc[future]
+        try:
+            response = store_api_get(params)
+            if response.status_code == 200:
+                data = response.json()
+                app_data = data.get(str(app_id), {})
+                if app_data.get('success', False):
+                    game_info = app_data.get('data', {})
+                    dlc_list = game_info.get('dlc', [])
+
+                    if dlc_list:
+                        logging.info(f"找到 {len(dlc_list)} 个官方DLC，开始获取详细信息...")
+
+                        for dlc_appid in dlc_list:
                             try:
-                                result = future.result()
+                                result = get_single_dlc_info(dlc_appid)
                                 if result:
                                     dlc_id, dlc_name = result
                                     official_dlcs[dlc_id] = dlc_name
                                     logging.info(f"添加官方DLC: {dlc_id} = {dlc_name}")
                             except Exception as e:
                                 logging.warning(f"处理DLC {dlc_appid} 时发生错误: {str(e)}")
-                            time.sleep(0.3)
+            else:
+                official_failed = True
+                logging.warning(f"官方DLC列表请求失败 (AppID: {app_id})，HTTP {response.status_code}，继续尝试SteamCMD")
+        except requests.exceptions.RequestException as e:
+            official_failed = True
+            logging.warning(f"官方DLC列表网络请求失败 (AppID: {app_id})，继续尝试SteamCMD: {str(e)}")
         
         # 2. 获取隐藏DLC
         hidden_dlcs = get_hidden_dlcs(app_id, game_name)
+        if official_failed and not hidden_dlcs:
+            logging.error(f"{game_name} 官方API和SteamCMD均获取失败，跳过该游戏，避免DLC更新不全")
+            return None
         
         # 3. 合并所有DLC
         all_dlcs = official_dlcs.copy()
@@ -538,10 +583,10 @@ def get_steam_dlc_enhanced(app_id):
         
     except requests.exceptions.RequestException as e:
         logging.error(f"网络请求错误 (AppID: {app_id}): {str(e)}")
-        return {}
+        return None
     except Exception as e:
         logging.error(f"获取DLC信息失败 (AppID: {app_id}): {str(e)}")
-        return {}
+        return None
 
 # 保持原有的文件解析和更新函数不变
 def parse_existing_dlc_from_ini(ini_path):
@@ -962,16 +1007,24 @@ def update_cream_api_ini_and_dlc_txt():
     latest_dlc_by_game = {}
     
     # 获取游戏的所有DLC
+    for game_name in SKIP_SCAN_GAMES:
+        if game_name in GAME_IDS:
+            logging.info(f"跳过 {game_name} DLC扫描：保留现有DLC配置")
+
     with ThreadPoolExecutor(max_workers=1) as executor:
         future_to_game = {
             executor.submit(get_steam_dlc_enhanced, app_id): game_name 
             for game_name, app_id in GAME_IDS.items()
+            if game_name not in SKIP_SCAN_GAMES
         }
         
         for future in as_completed(future_to_game):
             game_name = future_to_game[future]
             try:
                 latest_dlc = future.result()
+                if latest_dlc is None:
+                    logging.warning(f"跳过 {game_name}：本轮DLC数据获取失败")
+                    continue
                 
                 latest_dlc_by_game[game_name] = latest_dlc
 
