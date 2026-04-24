@@ -795,6 +795,58 @@ def append_new_dlc_to_ini(ini_path, new_dlc_dict, latest_dlc_by_game=None):
     with open(ini_path, 'w', encoding='utf-8') as f:
         f.writelines(output_lines)
 
+    normalize_ini_blank_lines(ini_path)
+
+def normalize_ini_blank_lines(ini_path):
+    """规范cream_api.ini空行：DLC内部无空行，游戏区块之间保留一行空行。"""
+    if not os.path.exists(ini_path):
+        return
+
+    with open(ini_path, 'r', encoding='utf-8') as f:
+        lines = f.readlines()
+
+    output_lines = []
+    in_dlc_block = False
+
+    for line in lines:
+        line_strip = line.strip()
+
+        if line_strip.startswith(';') and not line_strip.startswith(';lowviolence'):
+            if output_lines and output_lines[-1].strip():
+                output_lines.append('\n')
+            while len(output_lines) >= 2 and not output_lines[-1].strip() and not output_lines[-2].strip():
+                output_lines.pop()
+            output_lines.append(line if line.endswith('\n') else line + '\n')
+            in_dlc_block = False
+            continue
+
+        if line_strip == '[dlc]':
+            in_dlc_block = True
+            output_lines.append(line if line.endswith('\n') else line + '\n')
+            continue
+
+        if line_strip.startswith('[') and line_strip != '[dlc]':
+            in_dlc_block = False
+            output_lines.append(line if line.endswith('\n') else line + '\n')
+            continue
+
+        if in_dlc_block and not line_strip:
+            continue
+
+        if not line_strip:
+            if output_lines and output_lines[-1].strip():
+                output_lines.append('\n')
+            continue
+
+        output_lines.append(line if line.endswith('\n') else line + '\n')
+
+    while output_lines and not output_lines[-1].strip():
+        output_lines.pop()
+    output_lines.append('\n')
+
+    with open(ini_path, 'w', encoding='utf-8') as f:
+        f.writelines(output_lines)
+
 def append_new_dlc_to_txt(txt_path, new_dlc_dict, latest_dlc_by_game=None):
     """将新DLC追加到DLC.txt对应游戏区块中，避免重复和异常空格"""
     if not os.path.exists(txt_path):
@@ -930,6 +982,8 @@ def clean_duplicate_dlc_in_ini(ini_path):
     
     with open(ini_path, 'w', encoding='utf-8') as f:
         f.writelines(output_lines)
+
+    normalize_ini_blank_lines(ini_path)
     
     logging.info("成功清理cream_api.ini中的重复DLC条目")
 
